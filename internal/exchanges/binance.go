@@ -26,27 +26,28 @@ func NewBinance() *Binance {
 	}
 }
 
-func (b *Binance) Connect() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (c *Binance) Connect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	conn, _, err := websocket.DefaultDialer.Dial("wss://stream.binance.com:9443/ws", nil)
 	if err != nil {
 		return fmt.Errorf("binance connect: %w", err)
 	}
-	b.conn = conn
-	go b.readLoop()
-	go b.pingLoop()
+	c.conn = conn
+	go c.readLoop()
+	go c.pingLoop()
 	return nil
 }
 
-func (b *Binance) Subscribe(pair string, ch chan models.Trade) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (c *Binance) Subscribe(pair string, ch chan models.Trade) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	b.subs[pair] = ch
-	if b.conn == nil {
-		if err := b.Connect(); err != nil {
+	c.subs[pair] = ch
+	log.Debug().Str("pair", pair).Msg("Registered Binance subscriber channel")
+	if c.conn == nil {
+		if err := c.Connect(); err != nil {
 			return fmt.Errorf("binance subscribe %s: %w", pair, err)
 		}
 	}
@@ -57,31 +58,31 @@ func (b *Binance) Subscribe(pair string, ch chan models.Trade) error {
 		"params": params,
 		"id":     time.Now().UnixNano(),
 	}
-	if err := b.conn.WriteJSON(sub); err != nil {
+	if err := c.conn.WriteJSON(sub); err != nil {
 		return fmt.Errorf("binance subscribe %s: %w", pair, err)
 	}
 	log.Info().Str("pair", pair).Msg("Subscribed to Binance trade feed")
 	return nil
 }
 
-func (b *Binance) readLoop() {
-	for b.reconnect {
-		if b.conn == nil {
+func (c *Binance) readLoop() {
+	for c.reconnect {
+		if c.conn == nil {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		_, data, err := b.conn.ReadMessage()
+		_, data, err := c.conn.ReadMessage()
 		if err != nil {
 			log.Error().Err(err).Msg("Binance read error, reconnecting")
-			b.mu.Lock()
-			if b.conn != nil {
-				b.conn.Close()
-				b.conn = nil
+			c.mu.Lock()
+			if c.conn != nil {
+				c.conn.Close()
+				c.conn = nil
 			}
-			b.mu.Unlock()
+			c.mu.Unlock()
 			time.Sleep(5 * time.Second)
-			b.Connect()
-			b.resubscribe()
+			c.Connect()
+			c.resubscribe()
 			continue
 		}
 
@@ -109,49 +110,68 @@ func (b *Binance) readLoop() {
 
 		// Check for trade message
 		var tradeResp struct {
-			E string `json:"e"`
-			S string `json:"s"`
-			P string `json:"p"`
-			Q string `json:"q"`
-			T int64  `json:"T"`
-			M bool   `json:"M"`
+			EventType    string `json:"e"`
+			EventTime    int64  `json:"E"`
+			Symbol       string `json:"s"`
+			TradeID      int64  `json:"t"`
+			Price        string `json:"p"`
+			Quantity     string `json:"q"`
+			TradeTime    int64  `json:"T"`
+			IsBuyerMaker bool   `json:"m"`
+			IsTradeValid bool   `json:"M"`
 		}
-		if err := json.Unmarshal(data, &tradeResp); err == nil && tradeResp.E == "trade" && tradeResp.M {
-			price := util.ParseFloat(tradeResp.P)
-			quantity := util.ParseFloat(tradeResp.Q)
-			ts := time.UnixMilli(tradeResp.T)
-			pair := util.PairFromBinance(tradeResp.S)
-
-			b.mu.Lock()
-			ch, ok := b.subs[pair]
-			b.mu.Unlock()
-			if ok {
-				log.Debug().Str("pair", pair).Float64("price", price).Float64("quantity", quantity).Time("ts", ts).Msg("Received Binance trade")
-				ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}
-			} else {
-				log.Warn().Str("pair", pair).Msg("No subscriber for Binance trade")
+		if err := json.Unmarshal(data, &tradeResp); err != nil {
+			log.Warn().Err(err).Str("data", string(data)).Msg("Failed to unmarshal Binance message")
+			// Attempt to parse as a generic map to identify problematic field
+			var raw map[string]interface{}
+			if rawErr := json.Unmarshal(data, &raw); rawErr == nil {
+				log.Debug().Interface("raw_message", raw).Msg("Parsed raw Binance message for debugging")
 			}
 			continue
 		}
+		if tradeResp.EventType != "trade" {
+			log.Warn().Str("event", tradeResp.EventType).Str("data", string(data)).Msg("Non-trade Binance message")
+			continue
+		}
 
-		log.Warn().Str("data", string(data)).Msg("Received unhandled Binance message")
+		price := util.ParseFloat(tradeResp.Price)
+		quantity := util.ParseFloat(tradeResp.Quantity)
+		ts := time.UnixMilli(tradeResp.TradeTime)
+		pair := util.PairFromBinance(tradeResp.Symbol)
+
+		c.mu.Lock()
+		ch, ok := c.subs[pair]
+		if !ok {
+			log.Warn().Str("pair", pair).Interface("subs", c.subs).Str("data", string(data)).Msg("No subscriber for Binance trade pair")
+			c.mu.Unlock()
+			continue
+		}
+		c.mu.Unlock()
+
+		log.Debug().Str("pair", pair).Float64("price", price).Float64("quantity", quantity).Time("ts", ts).Msg("Received Binance trade")
+		select {
+		case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}:
+			log.Debug().Str("pair", pair).Msg("Sent Binance trade to channel")
+		default:
+			log.Warn().Str("pair", pair).Msg("Dropped Binance trade due to full channel")
+		}
 	}
 }
 
-func (b *Binance) pingLoop() {
+func (c *Binance) pingLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
-	for b.reconnect {
+	for c.reconnect {
 		select {
 		case <-ticker.C:
-			if b.conn != nil {
-				b.mu.Lock()
-				err := b.conn.WriteJSON(map[string]interface{}{
+			if c.conn != nil {
+				c.mu.Lock()
+				err := c.conn.WriteJSON(map[string]interface{}{
 					"method": "PING",
 					"id":     time.Now().UnixNano(),
 				})
-				b.mu.Unlock()
+				c.mu.Unlock()
 				if err != nil {
 					log.Error().Err(err).Msg("Binance ping error")
 				} else {
@@ -162,19 +182,19 @@ func (b *Binance) pingLoop() {
 	}
 }
 
-func (b *Binance) resubscribe() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (c *Binance) resubscribe() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	for pair := range b.subs {
+	for pair := range c.subs {
 		params := []string{fmt.Sprintf("%s@trade", util.PairToBinance(pair))}
 		sub := map[string]interface{}{
 			"method": "SUBSCRIBE",
 			"params": params,
 			"id":     time.Now().UnixNano(),
 		}
-		if b.conn != nil {
-			if err := b.conn.WriteJSON(sub); err != nil {
+		if c.conn != nil {
+			if err := c.conn.WriteJSON(sub); err != nil {
 				log.Error().Err(err).Str("pair", pair).Msg("Binance resubscribe failed")
 			} else {
 				log.Info().Str("pair", pair).Msg("Resubscribed to Binance trade feed")
@@ -183,13 +203,13 @@ func (b *Binance) resubscribe() {
 	}
 }
 
-func (b *Binance) Close() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (c *Binance) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	b.reconnect = false
-	if b.conn != nil {
-		b.conn.Close()
-		b.conn = nil
+	c.reconnect = false
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
 	}
 }

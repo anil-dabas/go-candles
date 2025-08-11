@@ -27,9 +27,21 @@ func PairFromOKX(instId string) string {
 }
 
 func PairToCoinbase(pair string) string {
-	return strings.ReplaceAll(pair, "USDT", "-USD")
+	if strings.HasSuffix(pair, "USDT") {
+		return strings.ReplaceAll(pair, "USDT", "-USDT")
+	}
+	if strings.HasSuffix(pair, "USDC") {
+		return strings.ReplaceAll(pair, "USDC", "-USDC")
+	}
+	return pair
 }
 
 func PairFromCoinbase(productID string) string {
-	return strings.ReplaceAll(productID, "-USD", "USDT")
+	if strings.HasSuffix(productID, "-USDT") {
+		return strings.ReplaceAll(productID, "-USDT", "USDT")
+	}
+	if strings.HasSuffix(productID, "-USDC") {
+		return strings.ReplaceAll(productID, "-USDC", "USDC")
+	}
+	return productID
 }

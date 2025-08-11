@@ -1,7 +1,6 @@
 package aggregator
 
 import (
-	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -9,101 +8,97 @@ import (
 )
 
 type Builder struct {
-	pair         string
-	intervalMs   int64
-	tradeCh      chan models.Trade
-	candleCh     chan models.Candle
-	mu           sync.Mutex
-	currentStart int64
-	open         float64
-	high         float64
-	low          float64
-	close        float64
-	volume       float64
-	hasData      bool
+	pair     string
+	interval time.Duration
+	trades   chan models.Trade
+	out      chan models.Candle
 }
 
-func NewBuilder(pair string, interval time.Duration, tradeCh chan models.Trade, candleCh chan models.Candle) *Builder {
-	return &Builder{
-		pair:         pair,
-		intervalMs:   int64(interval / time.Millisecond),
-		tradeCh:      tradeCh,
-		candleCh:     candleCh,
-		low:          1e9,
-		currentStart: time.Now().UnixMilli(),
+func NewBuilder(pair string, interval time.Duration, trades chan models.Trade, out chan models.Candle) *Builder {
+	log.Debug().Str("pair", pair).Dur("interval", interval).Msg("Creating new Builder")
+	b := &Builder{
+		pair:     pair,
+		interval: interval,
+		trades:   trades,
+		out:      out,
 	}
+	go func() {
+		log.Debug().Str("pair", pair).Msg("Starting buildLoop goroutine")
+		b.buildLoop()
+	}()
+	return b
 }
 
-func (b *Builder) Run() {
-	go b.run()
-}
+func (b *Builder) buildLoop() {
+	log.Debug().Str("pair", b.pair).Dur("interval", b.interval).Msg("Entered buildLoop")
+	defer log.Debug().Str("pair", b.pair).Msg("Exiting buildLoop")
 
-func (b *Builder) run() {
-	for trade := range b.tradeCh {
-		log.Debug().Str("pair", trade.Pair).Float64("price", trade.Price).Float64("quantity", trade.Quantity).Time("ts", trade.Timestamp).Msg("Aggregator received trade")
+	var candle *models.Candle
+	start := time.Now().UTC().Truncate(b.interval)
+	ticker := time.NewTicker(b.interval)
+	defer ticker.Stop()
 
-		tsMs := trade.Timestamp.UnixMilli()
-		bucketStart := (tsMs / b.intervalMs) * b.intervalMs
-
-		b.mu.Lock()
-		if bucketStart != b.currentStart && b.hasData {
-			b.candleCh <- models.Candle{
-				Pair:      b.pair,
-				Timestamp: time.UnixMilli(b.currentStart),
-				Open:      b.open,
-				High:      b.high,
-				Low:       b.low,
-				Close:     b.close,
-				Volume:    b.volume,
+	for {
+		select {
+		case trade, ok := <-b.trades:
+			if !ok {
+				log.Debug().Str("pair", b.pair).Msg("Trade channel closed")
+				if candle != nil {
+					log.Info().Str("pair", candle.Pair).Float64("open", candle.Open).Float64("close", candle.Close).Float64("high", candle.High).Float64("low", candle.Low).Float64("volume", candle.Volume).Time("ts", candle.Timestamp).Msg("Emitted final candle")
+					select {
+					case b.out <- *candle:
+						log.Debug().Str("pair", candle.Pair).Msg("Sent final candle to output channel")
+					default:
+						log.Warn().Str("pair", candle.Pair).Int("candleCh_len", len(b.out)).Int("candleCh_cap", cap(b.out)).Msg("Dropped final candle due to full output channel")
+					}
+				}
+				return
 			}
-			log.Info().Str("pair", b.pair).Float64("open", b.open).Float64("high", b.high).Float64("low", b.low).Float64("close", b.close).Float64("volume", b.volume).Time("ts", time.UnixMilli(b.currentStart)).Msg("Emitted candle")
-			b.reset(bucketStart, trade)
-		} else {
-			b.update(trade)
+			tradeTs := trade.Timestamp.UTC()
+			log.Debug().Str("pair", trade.Pair).Float64("price", trade.Price).Float64("quantity", trade.Quantity).Time("ts", tradeTs).Time("start", start).Time("next_interval", start.Add(b.interval)).Int("tradeCh_len", len(b.trades)).Int("tradeCh_cap", cap(b.trades)).Msg("Aggregator received trade")
+
+			if candle == nil || tradeTs.After(start.Add(b.interval)) {
+				if candle != nil {
+					log.Info().Str("pair", candle.Pair).Float64("open", candle.Open).Float64("close", candle.Close).Float64("high", candle.High).Float64("low", candle.Low).Float64("volume", candle.Volume).Time("ts", candle.Timestamp).Msg("Emitted candle")
+					select {
+					case b.out <- *candle:
+						log.Debug().Str("pair", candle.Pair).Msg("Sent candle to output channel")
+					default:
+						log.Warn().Str("pair", candle.Pair).Int("candleCh_len", len(b.out)).Int("candleCh_cap", cap(b.out)).Msg("Dropped candle due to full output channel")
+					}
+				}
+				start = tradeTs.Truncate(b.interval)
+				candle = &models.Candle{
+					Pair:      trade.Pair,
+					Timestamp: start,
+					Open:      trade.Price,
+					High:      trade.Price,
+					Low:       trade.Price,
+					Close:     trade.Price,
+					Volume:    trade.Quantity,
+				}
+			} else {
+				candle.Close = trade.Price
+				if trade.Price > candle.High {
+					candle.High = trade.Price
+				}
+				if trade.Price < candle.Low {
+					candle.Low = trade.Price
+				}
+				candle.Volume += trade.Quantity
+			}
+		case <-ticker.C:
+			if candle != nil {
+				log.Info().Str("pair", candle.Pair).Float64("open", candle.Open).Float64("close", candle.Close).Float64("high", candle.High).Float64("low", candle.Low).Float64("volume", candle.Volume).Time("ts", candle.Timestamp).Msg("Emitted candle on ticker")
+				select {
+				case b.out <- *candle:
+					log.Debug().Str("pair", candle.Pair).Msg("Sent candle to output channel")
+				default:
+					log.Warn().Str("pair", candle.Pair).Int("candleCh_len", len(b.out)).Int("candleCh_cap", cap(b.out)).Msg("Dropped candle due to full output channel")
+				}
+				start = time.Now().UTC().Truncate(b.interval)
+				candle = nil
+			}
 		}
-		b.mu.Unlock()
 	}
-}
-
-func (b *Builder) update(trade models.Trade) {
-	b.hasData = true
-	if b.open == 0 {
-		b.open = trade.Price
-	}
-	b.high = max(b.high, trade.Price)
-	b.low = min(b.low, trade.Price)
-	b.close = trade.Price
-	b.volume += trade.Quantity
-}
-
-func (b *Builder) reset(bucketStart int64, trade models.Trade) {
-	b.currentStart = bucketStart
-	b.open = trade.Price
-	b.high = trade.Price
-	b.low = trade.Price
-	b.close = trade.Price
-	b.volume = trade.Quantity
-	b.hasData = true
-}
-
-func (b *Builder) AddTrade(trade models.Trade) {
-	b.tradeCh <- trade
-}
-
-func (b *Builder) Close() {
-	close(b.tradeCh)
-}
-
-func max(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func min(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }

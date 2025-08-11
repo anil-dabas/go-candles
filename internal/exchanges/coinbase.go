@@ -115,7 +115,7 @@ func (c *Coinbase) readLoop() {
 			continue
 		}
 
-		// Check for trade message
+		// Check for trade message (match)
 		var tradeResp struct {
 			Type      string `json:"type"`
 			ProductID string `json:"product_id"`
@@ -126,7 +126,7 @@ func (c *Coinbase) readLoop() {
 		if err := json.Unmarshal(data, &tradeResp); err == nil && tradeResp.Type == "match" {
 			price := util.ParseFloat(tradeResp.Price)
 			quantity := util.ParseFloat(tradeResp.Size)
-			ts, err := time.Parse(time.RFC3339, tradeResp.Time)
+			ts, err := time.Parse(time.RFC3339Nano, tradeResp.Time)
 			if err != nil {
 				log.Error().Err(err).Str("time", tradeResp.Time).Msg("Failed to parse Coinbase trade time")
 				continue
@@ -141,6 +141,47 @@ func (c *Coinbase) readLoop() {
 				ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}
 			} else {
 				log.Warn().Str("pair", pair).Msg("No subscriber for Coinbase trade")
+			}
+			continue
+		}
+
+		// Check for snapshot message
+		var snapshotResp struct {
+			Channel string `json:"channel"`
+			Events  []struct {
+				Type   string `json:"type"`
+				Trades []struct {
+					ProductID string `json:"product_id"`
+					Price     string `json:"price"`
+					Size      string `json:"size"`
+					Time      string `json:"time"`
+				} `json:"trades"`
+			} `json:"events"`
+		}
+		if err := json.Unmarshal(data, &snapshotResp); err == nil && snapshotResp.Channel == "market_trades" {
+			for _, event := range snapshotResp.Events {
+				if event.Type == "snapshot" {
+					for _, trade := range event.Trades {
+						price := util.ParseFloat(trade.Price)
+						quantity := util.ParseFloat(trade.Size)
+						ts, err := time.Parse(time.RFC3339Nano, trade.Time)
+						if err != nil {
+							log.Error().Err(err).Str("time", trade.Time).Msg("Failed to parse Coinbase snapshot trade time")
+							continue
+						}
+						pair := util.PairFromCoinbase(trade.ProductID)
+
+						c.mu.Lock()
+						ch, ok := c.subs[pair]
+						c.mu.Unlock()
+						if ok {
+							log.Debug().Str("pair", pair).Float64("price", price).Float64("quantity", quantity).Time("ts", ts).Msg("Received Coinbase snapshot trade")
+							ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}
+						} else {
+							log.Warn().Str("pair", pair).Msg("No subscriber for Coinbase snapshot trade")
+						}
+					}
+				}
 			}
 			continue
 		}
