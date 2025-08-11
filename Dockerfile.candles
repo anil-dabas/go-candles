@@ -1,8 +1,12 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o candles ./cmd/candles
+RUN go mod download
+RUN go build -o /app/candles ./cmd/candles
 
 FROM alpine:latest
-COPY --from=builder /app/candles /usr/bin/candles
-CMD ["candles", "--interval=5"]
+WORKDIR /app
+COPY --from=builder /app/candles /app/
+COPY configs/ ./configs/
+EXPOSE 50051
+CMD ["/app/candles", "--config=./configs/config.yml"]

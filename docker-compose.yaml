@@ -1,0 +1,17 @@
+services:
+  candles:
+    build:
+      context: .
+      dockerfile: Dockerfile.candles
+    container_name: candles
+    ports:
+      - "50051:50051"
+    volumes:
+      - ./configs:/app/configs
+    healthcheck:
+      test: ["CMD-SHELL", "nc -zv localhost 50051 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    command: ["/app/candles", "--config=./configs/config.yml"]

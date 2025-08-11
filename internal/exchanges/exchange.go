@@ -1,8 +1,6 @@
 package exchanges
 
-import (
-	"go-candles/pkg/models"
-)
+import "go-candles/pkg/models"
 
 type Exchange interface {
 	Connect() error

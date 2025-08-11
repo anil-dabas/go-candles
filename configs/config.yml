@@ -1,0 +1,26 @@
+server:
+  port: 50051
+  host: "localhost"
+
+pairs:
+  - "BTCUSDT"
+  - "ETHUSDT"
+  - "SOLUSDT"
+
+exchanges:
+  binance:
+    websocket_url: "wss://stream.binance.com:9443/ws"
+    reconnect_interval_sec: 5
+    ping_interval_sec: 300
+  coinbase:
+    websocket_url: "wss://advanced-trade-ws.coinbase.com"
+    reconnect_interval_sec: 5
+    ping_interval_sec: 300
+  okx:
+    websocket_url: "wss://ws.okx.com:8443/ws/v5/public"
+    reconnect_interval_sec: 5
+    ping_interval_sec: 25
+
+candle_interval_sec: 5
+channel_buffer_size: 10000
+max_reconnect_attempts: 10

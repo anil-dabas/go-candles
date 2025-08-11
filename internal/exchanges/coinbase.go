@@ -3,26 +3,36 @@ package exchanges
 import (
 	"encoding/json"
 	"fmt"
-	"go-candles/internal/util"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
+	"go-candles/internal/common"
+	"go-candles/internal/util"
 	"go-candles/pkg/models"
 )
 
 type Coinbase struct {
-	conn      *websocket.Conn
-	mu        sync.Mutex
-	subs      map[string]chan models.Trade
-	reconnect bool
+	conn                 *websocket.Conn
+	mu                   sync.Mutex
+	subs                 map[string]chan models.Trade
+	reconnect            bool
+	wsURL                string
+	reconnectInterval    time.Duration
+	pingInterval         time.Duration
+	maxReconnectAttempts int
+	reconnectAttempts    int
 }
 
-func NewCoinbase() *Coinbase {
+func NewCoinbase(wsURL string, reconnectInterval, pingInterval time.Duration, maxReconnectAttempts int) *Coinbase {
 	return &Coinbase{
-		subs:      make(map[string]chan models.Trade),
-		reconnect: true,
+		subs:                 make(map[string]chan models.Trade),
+		reconnect:            true,
+		wsURL:                wsURL,
+		reconnectInterval:    reconnectInterval,
+		pingInterval:         pingInterval,
+		maxReconnectAttempts: maxReconnectAttempts,
 	}
 }
 
@@ -30,11 +40,14 @@ func (c *Coinbase) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	conn, _, err := websocket.DefaultDialer.Dial("wss://advanced-trade-ws.coinbase.com", nil)
+	conn, _, err := websocket.DefaultDialer.Dial(c.wsURL, nil)
 	if err != nil {
-		return fmt.Errorf("coinbase connect: %w", err)
+		return fmt.Errorf("%s: %w", common.ErrMsgExchangeConnectFailed.String(), err)
 	}
 	c.conn = conn
+	c.reconnectAttempts = 0
+	c.conn.SetReadLimit(1 << 20) // Set 1MB read limit
+
 	go c.readLoop()
 	go c.pingLoop()
 	return nil
@@ -47,7 +60,7 @@ func (c *Coinbase) Subscribe(pair string, ch chan models.Trade) error {
 	c.subs[pair] = ch
 	if c.conn == nil {
 		if err := c.Connect(); err != nil {
-			return fmt.Errorf("coinbase subscribe %s: %w", pair, err)
+			return fmt.Errorf("%s %s: %w", common.ErrMsgExchangeSubscribeFailed.String(), pair, err)
 		}
 	}
 
@@ -57,34 +70,80 @@ func (c *Coinbase) Subscribe(pair string, ch chan models.Trade) error {
 		"channel":     "market_trades",
 	}
 	if err := c.conn.WriteJSON(msg); err != nil {
-		return fmt.Errorf("coinbase subscribe %s: %w", pair, err)
+		return fmt.Errorf("%s %s: %w", common.ErrMsgExchangeSubscribeFailed.String(), pair, err)
 	}
-	log.Info().Str("pair", pair).Interface("msg", msg).Msg("Sent Coinbase subscription request")
+
+	log.Info().Str("pair", pair).Msg("Subscribed to Coinbase trade feed")
 	return nil
 }
 
 func (c *Coinbase) readLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().
+				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
+				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
+				Interface("recover", r).
+				Msg("Recovered from panic in Coinbase read loop")
+
+			c.mu.Lock()
+			if c.conn != nil {
+				if err := c.conn.Close(); err != nil {
+					log.Error().
+						Err(err).
+						Str("error_code", common.ErrCodeCoinbaseExchangeConnectionCloseFailed.String()).
+						Str("error_message", common.ErrMsgCoinbaseExchangeConnectionCloseFailed.String()).
+						Msg("Failed to close Binance WebSocket connection")
+				}
+				c.conn = nil
+			}
+			c.mu.Unlock()
+
+			if c.reconnectAttempts < c.maxReconnectAttempts {
+				time.Sleep(c.reconnectInterval)
+				if err := c.Connect(); err != nil {
+					log.Error().Err(err).Msg("Reconnect failed after panic")
+				}
+			}
+		}
+	}()
+
 	for c.reconnect {
 		if c.conn == nil {
-			time.Sleep(5 * time.Second)
+			time.Sleep(c.reconnectInterval)
 			continue
 		}
+
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Error().Err(err).Msg("Coinbase read error, reconnecting")
+			log.Error().
+				Err(err).
+				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
+				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
+				Msg("Coinbase read error, reconnecting")
+
 			c.mu.Lock()
 			if c.conn != nil {
 				c.conn.Close()
 				c.conn = nil
 			}
 			c.mu.Unlock()
-			time.Sleep(5 * time.Second)
-			c.Connect()
+
+			if c.reconnectAttempts >= c.maxReconnectAttempts {
+				log.Error().Msg("Max reconnect attempts reached")
+				c.reconnect = false
+				return
+			}
+
+			c.reconnectAttempts++
+			time.Sleep(c.reconnectInterval)
+			if err := c.Connect(); err != nil {
+				log.Error().Err(err).Msg("Reconnect failed")
+				continue
+			}
 			c.resubscribe()
 			continue
 		}
-
-		log.Debug().Str("raw", string(data)).Msg("Received Coinbase message")
 
 		// Check for error response
 		var errorResp struct {
@@ -92,7 +151,10 @@ func (c *Coinbase) readLoop() {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(data, &errorResp); err == nil && errorResp.Type == "error" {
-			log.Error().Str("message", errorResp.Message).Msg("Coinbase subscription error")
+			log.Error().
+				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
+				Str("error_message", errorResp.Message).
+				Msg("Coinbase subscription error")
 			continue
 		}
 
@@ -101,7 +163,6 @@ func (c *Coinbase) readLoop() {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(data, &pingResp); err == nil && pingResp.Type == "heartbeat" {
-			log.Debug().Msg("Received Coinbase heartbeat")
 			continue
 		}
 
@@ -111,7 +172,6 @@ func (c *Coinbase) readLoop() {
 			Channels []string `json:"channels"`
 		}
 		if err := json.Unmarshal(data, &subResp); err == nil && subResp.Type == "subscriptions" {
-			log.Debug().Interface("channels", subResp.Channels).Msg("Received Coinbase subscription confirmation")
 			continue
 		}
 
@@ -128,7 +188,10 @@ func (c *Coinbase) readLoop() {
 			quantity := util.ParseFloat(tradeResp.Size)
 			ts, err := time.Parse(time.RFC3339Nano, tradeResp.Time)
 			if err != nil {
-				log.Error().Err(err).Str("time", tradeResp.Time).Msg("Failed to parse Coinbase trade time")
+				log.Error().
+					Err(err).
+					Str("time", tradeResp.Time).
+					Msg("Failed to parse Coinbase trade time")
 				continue
 			}
 			pair := util.PairFromCoinbase(tradeResp.ProductID)
@@ -137,10 +200,16 @@ func (c *Coinbase) readLoop() {
 			ch, ok := c.subs[pair]
 			c.mu.Unlock()
 			if ok {
-				log.Debug().Str("pair", pair).Float64("price", price).Float64("quantity", quantity).Time("ts", ts).Msg("Received Coinbase trade")
-				ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}
-			} else {
-				log.Warn().Str("pair", pair).Msg("No subscriber for Coinbase trade")
+				select {
+				case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}:
+					log.Debug().Str("pair", pair).Msg("Sent Coinbase trade to channel")
+				default:
+					log.Warn().
+						Str("error_code", common.ErrCodeChannelFull.String()).
+						Str("error_message", common.ErrMsgChannelFull.String()).
+						Str("pair", pair).
+						Msg("Dropped Coinbase trade due to full channel")
+				}
 			}
 			continue
 		}
@@ -166,7 +235,10 @@ func (c *Coinbase) readLoop() {
 						quantity := util.ParseFloat(trade.Size)
 						ts, err := time.Parse(time.RFC3339Nano, trade.Time)
 						if err != nil {
-							log.Error().Err(err).Str("time", trade.Time).Msg("Failed to parse Coinbase snapshot trade time")
+							log.Error().
+								Err(err).
+								Str("time", trade.Time).
+								Msg("Failed to parse Coinbase snapshot trade time")
 							continue
 						}
 						pair := util.PairFromCoinbase(trade.ProductID)
@@ -175,40 +247,44 @@ func (c *Coinbase) readLoop() {
 						ch, ok := c.subs[pair]
 						c.mu.Unlock()
 						if ok {
-							log.Debug().Str("pair", pair).Float64("price", price).Float64("quantity", quantity).Time("ts", ts).Msg("Received Coinbase snapshot trade")
-							ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}
-						} else {
-							log.Warn().Str("pair", pair).Msg("No subscriber for Coinbase snapshot trade")
+							select {
+							case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}:
+								log.Debug().Str("pair", pair).Msg("Sent Coinbase snapshot trade to channel")
+							default:
+								log.Warn().
+									Str("error_code", common.ErrCodeChannelFull.String()).
+									Str("error_message", common.ErrMsgChannelFull.String()).
+									Str("pair", pair).
+									Msg("Dropped Coinbase snapshot trade due to full channel")
+							}
 						}
 					}
 				}
 			}
 			continue
 		}
-
-		log.Warn().Str("data", string(data)).Msg("Received unhandled Coinbase message")
 	}
 }
 
 func (c *Coinbase) pingLoop() {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 
 	for c.reconnect {
-		select {
-		case <-ticker.C:
-			if c.conn != nil {
-				c.mu.Lock()
-				err := c.conn.WriteJSON(map[string]interface{}{
-					"type": "heartbeat",
-					"on":   true,
-				})
-				c.mu.Unlock()
-				if err != nil {
-					log.Error().Err(err).Msg("Coinbase ping error")
-				} else {
-					log.Debug().Msg("Sent Coinbase ping")
-				}
+		<-ticker.C
+		if c.conn != nil {
+			c.mu.Lock()
+			err := c.conn.WriteJSON(map[string]interface{}{
+				"type": "heartbeat",
+				"on":   true,
+			})
+			c.mu.Unlock()
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("error_code", common.ErrCodeExchangePingFailed.String()).
+					Str("error_message", common.ErrMsgExchangePingFailed.String()).
+					Msg("Coinbase ping error")
 			}
 		}
 	}
@@ -226,7 +302,12 @@ func (c *Coinbase) resubscribe() {
 		}
 		if c.conn != nil {
 			if err := c.conn.WriteJSON(msg); err != nil {
-				log.Error().Err(err).Str("pair", pair).Msg("Coinbase resubscribe failed")
+				log.Error().
+					Err(err).
+					Str("error_code", common.ErrCodeExchangeSubscribeFailed.String()).
+					Str("error_message", common.ErrMsgExchangeSubscribeFailed.String()).
+					Str("pair", pair).
+					Msg("Coinbase resubscribe failed")
 			} else {
 				log.Info().Str("pair", pair).Msg("Resubscribed to Coinbase trade feed")
 			}
@@ -240,7 +321,13 @@ func (c *Coinbase) Close() {
 
 	c.reconnect = false
 	if c.conn != nil {
-		c.conn.Close()
+		if err := c.conn.Close(); err != nil {
+			log.Error().
+				Err(err).
+				Str("error_code", common.ErrCodeCoinbaseExchangeConnectionCloseFailed.String()).
+				Str("error_message", common.ErrMsgCoinbaseExchangeConnectionCloseFailed.String()).
+				Msg("Failed to close Binance WebSocket connection during shutdown")
+		}
 		c.conn = nil
 	}
 }

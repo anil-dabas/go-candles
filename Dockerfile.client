@@ -1,8 +1,10 @@
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
 COPY . .
-RUN go build -o client ./cmd/client
+RUN go mod download
+RUN go build -o /app/client ./cmd/client
 
 FROM alpine:latest
-COPY --from=builder /app/client /usr/bin/client
-CMD ["client", "--pairs=BTCUSDT,ETHUSDT"]
+WORKDIR /app
+COPY --from=builder /app/client /app/
+CMD ["/app/client", "--pairs=BTCUSDT,ETHUSDT,SOLUSDT", "--retry=3", "--max-retries=20"]
