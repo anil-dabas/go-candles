@@ -1,7 +1,7 @@
 package common
 
 const (
-	DefaultConfigPath        = "configs/config.yml"
+	DefaultConfigPath        = "./configs/config.yml"
 	DefaultCandleIntervalSec = 5
 	DefaultChannelBufferSize = 10000
 

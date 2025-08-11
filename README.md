@@ -43,8 +43,11 @@ This project is a simple exercise to subscribe to trades data of different excha
     ```bash
    cd go-candles
    go mod tidy
+   make all
    go build -o candles cmd/candles/main.go 
-   ./candles --config="./configs/config.yml"
+   ./candles --config="./configs/config.yml"    
+        "or"    
+   ./candles            # As the default config path is set to "./configs/config.yml"
    ```
 4. Run the client service:
    Make sure you are in `go-candles` folder and run:
