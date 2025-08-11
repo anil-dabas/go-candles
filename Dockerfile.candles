@@ -1,0 +1,8 @@
+FROM golang:1.22-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o candles ./cmd/candles
+
+FROM alpine:latest
+COPY --from=builder /app/candles /usr/bin/candles
+CMD ["candles", "--interval=5"]

@@ -1,0 +1,14 @@
+version: '3'
+services:
+  candles:
+    build:
+      context: .
+      dockerfile: Dockerfile.candles
+    ports:
+      - "50051:50051"
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+    depends_on:
+      - candles

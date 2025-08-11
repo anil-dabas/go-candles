@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package candles;
+
+option go_package = "internal/proto";
+
+service CandleService {
+  rpc Subscribe(SubscribeRequest) returns (stream CandleResponse);
+}
+
+message SubscribeRequest {
+  repeated string pairs = 1;  // e.g., ["BTCUSDT", "ETHUSDT"]
+}
+
+message CandleResponse {
+  string pair = 1;
+  int64 timestamp = 2;  // Unix ms, start of interval
+  double open = 3;
+  double high = 4;
+  double low = 5;
+  double close = 6;
+  double volume = 7;
+}
