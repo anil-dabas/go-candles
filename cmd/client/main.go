@@ -28,11 +28,6 @@ var kacp = keepalive.ClientParameters{
 }
 
 func main() {
-	// Configure logger
-	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	logger := util.NewLogger()
-
 	configPath := flag.String("config", common.DefaultConfigPath, "Path to config file")
 	pairsStr := flag.String("pairs", "", "Comma-separated pairs to subscribe (overrides config)")
 	retryInterval := flag.Int("retry", 5, "Retry interval in seconds for reconnection")
@@ -41,9 +36,27 @@ func main() {
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		logger.Error(err, common.ErrCodeConfigLoadFailed, common.ErrMsgConfigLoadFailed, "Failed to load config")
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("Failed to load config")
 	}
+
+	// Set global log level from config
+	switch cfg.LogLevel {
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "warn":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	default:
+		log.Fatal().Str("log_level", cfg.LogLevel).Msg("Invalid log level in config, use: debug, info, warn, error")
+	}
+
+	// Configure logger
+	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	logger := util.NewLogger()
 
 	var pairs []string
 	if *pairsStr != "" {

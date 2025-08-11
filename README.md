@@ -14,6 +14,14 @@ This project is a simple exercise to subscribe to trades data of different excha
     1. `candles` - That service is responsible for subscribing to trades data of different exchanges and then aggregating that data and finally creating the candles from the trade data.
     2. `client` - That service is responsible for subscribing to the candle data and then displaying that data in a web page.
 
+### Log levels 
+- The project uses different log levels to display the logs in the console.
+- The log levels are `info`, `debug`, `error`, and `warn`.
+- The log level can be set in the `config.yml` file or by using the `log_level` environment variable.
+- The default log level is `debug` set in the `config.yml` file.
+- If you want to see fewer logs, you can change the log level to `info` or `warn` in the `config.yml` file.
+- This will not impact the candles printing on the console via the client service.
+
 ### How to run the project
 
 #### Prerequisites

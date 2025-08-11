@@ -26,10 +26,13 @@ type Config struct {
 	CandleIntervalSec    int                       `yaml:"candle_interval_sec"`
 	ChannelBufferSize    int                       `yaml:"channel_buffer_size"`
 	MaxReconnectAttempts int                       `yaml:"max_reconnect_attempts"`
+	LogLevel             string                    `yaml:"log_level"` // Add this field
 }
 
 func LoadConfig(path string) (*Config, error) {
-	config := &Config{}
+	config := &Config{
+		LogLevel: "info", // Default log level
+	}
 
 	file, err := os.Open(path)
 	if err != nil {

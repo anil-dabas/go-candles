@@ -19,17 +19,31 @@ import (
 )
 
 func main() {
-	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
-	logger := util.NewLogger()
-
 	configPath := flag.String("config", common.DefaultConfigPath, "Path to config file")
 	flag.Parse()
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		logger.Error(err, common.ErrCodeConfigLoadFailed, common.ErrMsgConfigLoadFailed, "Failed to load config")
-		os.Exit(1)
+		log.Fatal().Err(err).Msg("Failed to load config")
 	}
+
+	// Set global log level from config
+	switch cfg.LogLevel {
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "warn":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	default:
+		log.Fatal().Str("log_level", cfg.LogLevel).Msg("Invalid log level in config, use: debug, info, warn, error")
+	}
+
+	// Configure logger
+	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
+	logger := util.NewLogger()
 
 	s := service.NewService(cfg)
 
