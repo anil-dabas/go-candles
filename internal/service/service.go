@@ -6,12 +6,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rs/zerolog/log"
 	"go-candles/internal/aggregator"
 	"go-candles/internal/common"
 	"go-candles/internal/config"
 	"go-candles/internal/exchanges"
 	"go-candles/internal/proto"
+	"go-candles/internal/util"
 	"go-candles/pkg/models"
 )
 
@@ -76,6 +76,7 @@ func NewService(cfg *config.Config) *Service {
 }
 
 func (s *Service) init() {
+	logger := util.NewLogger()
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	bufferSize := s.config.GetChannelBufferSize()
@@ -102,24 +103,13 @@ func (s *Service) init() {
 		ex := ex
 		go func() {
 			if err := ex.Connect(); err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangeConnectFailed.String()).
-					Str("error_message", common.ErrMsgExchangeConnectFailed.String()).
-					Str("exchange", fmt.Sprintf("%T", ex)).
-					Msg("Exchange connect failed")
+				logger.Error(err, common.ErrCodeExchangeConnectFailed, common.ErrMsgExchangeConnectFailed, "Exchange connect failed", "exchange", fmt.Sprintf("%T", ex))
 				return
 			}
 
 			for _, pair := range s.pairs {
 				if err := ex.Subscribe(pair, s.tradeChans[pair]); err != nil {
-					log.Error().
-						Err(err).
-						Str("error_code", common.ErrCodeExchangeSubscribeFailed.String()).
-						Str("error_message", common.ErrMsgExchangeSubscribeFailed.String()).
-						Str("exchange", fmt.Sprintf("%T", ex)).
-						Str("pair", pair).
-						Msg("Subscribe failed")
+					logger.Error(err, common.ErrCodeExchangeSubscribeFailed, common.ErrMsgExchangeSubscribeFailed, "Subscribe failed", "exchange", fmt.Sprintf("%T", ex), "pair", pair)
 				}
 			}
 		}()
@@ -127,13 +117,10 @@ func (s *Service) init() {
 }
 
 func (s *Service) emitLoop(pair string, candleCh chan models.Candle) {
+	logger := util.NewLogger()
 	listener, ok := s.listeners[pair]
 	if !ok {
-		log.Error().
-			Str("error_code", common.ErrCodeInvalidPair.String()).
-			Str("error_message", common.ErrMsgInvalidPair.String()).
-			Str("pair", pair).
-			Msg("No listener found for pair")
+		logger.Error(nil, common.ErrCodeInvalidPair, common.ErrMsgInvalidPair, "No listener found for pair", "pair", pair)
 		return
 	}
 
@@ -152,13 +139,9 @@ func (s *Service) emitLoop(pair string, candleCh chan models.Candle) {
 		for _, ch := range listener.chans {
 			select {
 			case ch <- resp:
-				log.Debug().Str("pair", pair).Msg("Sent candle to subscriber")
+				logger.Debug("Sent candle to subscriber", "pair", pair)
 			default:
-				log.Warn().
-					Str("error_code", common.ErrCodeChannelFull.String()).
-					Str("error_message", common.ErrMsgChannelFull.String()).
-					Str("pair", pair).
-					Msg("Dropped candle due to full subscriber channel")
+				logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped candle due to full subscriber channel", "pair", pair)
 			}
 		}
 		listener.mu.Unlock()
@@ -166,6 +149,7 @@ func (s *Service) emitLoop(pair string, candleCh chan models.Candle) {
 }
 
 func (s *Service) Subscribe(req *proto.SubscribeRequest, stream proto.CandleService_SubscribeServer) error {
+	logger := util.NewLogger()
 	subChans := make(map[string]chan *proto.CandleResponse)
 
 	for _, pair := range req.Pairs {
@@ -174,11 +158,7 @@ func (s *Service) Subscribe(req *proto.SubscribeRequest, stream proto.CandleServ
 		s.listenersMu.Unlock()
 
 		if !ok {
-			log.Warn().
-				Str("error_code", common.ErrCodeInvalidPair.String()).
-				Str("error_message", common.ErrMsgInvalidPair.String()).
-				Str("pair", pair).
-				Msg("No listener found for pair, skipping subscription")
+			logger.Warn(common.ErrCodeInvalidPair, common.ErrMsgInvalidPair, "No listener found for pair, skipping subscription", "pair", pair)
 			continue
 		}
 
@@ -196,11 +176,7 @@ func (s *Service) Subscribe(req *proto.SubscribeRequest, stream proto.CandleServ
 				s.listenersMu.Unlock()
 
 				if !ok {
-					log.Error().
-						Str("error_code", common.ErrCodeInvalidPair.String()).
-						Str("error_message", common.ErrMsgInvalidPair.String()).
-						Str("pair", p).
-						Msg("No listener found for pair during cleanup")
+					logger.Error(nil, common.ErrCodeInvalidPair, common.ErrMsgInvalidPair, "No listener found for pair during cleanup", "pair", p)
 					return
 				}
 
@@ -222,12 +198,7 @@ func (s *Service) Subscribe(req *proto.SubscribeRequest, stream proto.CandleServ
 						return
 					}
 					if err := stream.Send(msg); err != nil {
-						log.Error().
-							Err(err).
-							Str("error_code", common.ErrCodeStreamClosed.String()).
-							Str("error_message", common.ErrMsgStreamClosed.String()).
-							Str("pair", p).
-							Msg("Failed to send candle to stream")
+						logger.Error(err, common.ErrCodeStreamClosed, common.ErrMsgStreamClosed, "Failed to send candle to stream", "pair", p)
 						return
 					}
 				case <-stream.Context().Done():

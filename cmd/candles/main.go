@@ -14,22 +14,21 @@ import (
 	"go-candles/internal/config"
 	"go-candles/internal/proto"
 	"go-candles/internal/service"
+	"go-candles/internal/util"
 	"google.golang.org/grpc"
 )
 
 func main() {
 	log.Logger = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
+	logger := util.NewLogger()
 
 	configPath := flag.String("config", common.DefaultConfigPath, "Path to config file")
 	flag.Parse()
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatal().
-			Err(err).
-			Str("error_code", common.ErrCodeConfigLoadFailed.String()).
-			Str("error_message", common.ErrMsgConfigLoadFailed.String()).
-			Msg("Failed to load config")
+		logger.Error(err, common.ErrCodeConfigLoadFailed, common.ErrMsgConfigLoadFailed, "Failed to load config")
+		os.Exit(1)
 	}
 
 	s := service.NewService(cfg)
@@ -37,25 +36,18 @@ func main() {
 	serverAddr := fmt.Sprintf(":%d", cfg.Server.Port)
 	lis, err := net.Listen("tcp", serverAddr)
 	if err != nil {
-		log.Fatal().
-			Err(err).
-			Str("error_code", common.ErrCodeGRPCServeFailed.String()).
-			Str("error_message", common.ErrMsgGRPCServeFailed.String()).
-			Str("address", serverAddr).
-			Msg("Failed to listen")
+		logger.Error(err, common.ErrCodeGRPCServeFailed, common.ErrMsgGRPCServeFailed, "Failed to listen", "address", serverAddr)
+		os.Exit(1)
 	}
 
 	grpcServer := grpc.NewServer()
 	proto.RegisterCandleServiceServer(grpcServer, s)
 
 	go func() {
-		log.Info().Str("address", serverAddr).Msg("Starting gRPC server")
+		logger.Info("Starting gRPC server", "address", serverAddr)
 		if err := grpcServer.Serve(lis); err != nil {
-			log.Fatal().
-				Err(err).
-				Str("error_code", common.ErrCodeGRPCServeFailed.String()).
-				Str("error_message", common.ErrMsgGRPCServeFailed.String()).
-				Msg("gRPC serve failed")
+			logger.Error(err, common.ErrCodeGRPCServeFailed, common.ErrMsgGRPCServeFailed, "gRPC serve failed")
+			os.Exit(1)
 		}
 	}()
 
@@ -63,8 +55,8 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	log.Info().Msg("Shutting down server...")
+	logger.Info("Shutting down server...")
 	s.Shutdown()
 	grpcServer.GracefulStop()
-	log.Info().Msg("Server stopped gracefully")
+	logger.Info("Server stopped gracefully")
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/rs/zerolog/log"
 	"go-candles/internal/common"
 	"go-candles/internal/util"
 	"go-candles/pkg/models"
@@ -54,6 +53,7 @@ func (o *OKX) Connect() error {
 }
 
 func (o *OKX) Subscribe(pair string, ch chan models.Trade) error {
+	logger := util.NewLogger()
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -75,11 +75,12 @@ func (o *OKX) Subscribe(pair string, ch chan models.Trade) error {
 		return fmt.Errorf("%s %s: %w", common.ErrMsgExchangeSubscribeFailed.String(), pair, err)
 	}
 
-	log.Info().Str("pair", pair).Msg("Subscribed to OKX trade feed")
+	logger.Info("Subscribed to OKX trade feed", "pair", pair)
 	return nil
 }
 
 func (o *OKX) readLoop() {
+	logger := util.NewLogger()
 	for o.reconnect {
 		if o.conn == nil {
 			time.Sleep(o.reconnectInterval)
@@ -88,27 +89,19 @@ func (o *OKX) readLoop() {
 
 		_, data, err := o.conn.ReadMessage()
 		if err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
-				Msg("OKX read error, reconnecting")
+			logger.Error(err, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "OKX read error, reconnecting")
 
 			o.mu.Lock()
 			if o.conn != nil {
 				if err := o.conn.Close(); err != nil {
-					log.Error().
-						Err(err).
-						Str("error_code", common.ErrCodeOKXExchangeConnectionCloseFailed.String()).
-						Str("error_message", common.ErrMsgOKXExchangeConnectionCloseFailed.String()).
-						Msg("Failed to close Binance WebSocket connection")
+					logger.Error(err, common.ErrCodeOKXExchangeConnectionCloseFailed, common.ErrMsgOKXExchangeConnectionCloseFailed, "Failed to close OKX WebSocket connection")
 				}
 				o.conn = nil
 			}
 			o.mu.Unlock()
 
 			if o.reconnectAttempts >= o.maxReconnectAttempts {
-				log.Error().Msg("Max reconnect attempts reached")
+				logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Max reconnect attempts reached")
 				o.reconnect = false
 				return
 			}
@@ -116,7 +109,7 @@ func (o *OKX) readLoop() {
 			o.reconnectAttempts++
 			time.Sleep(o.reconnectInterval)
 			if err := o.Connect(); err != nil {
-				log.Error().Err(err).Msg("Reconnect failed")
+				logger.Error(err, common.ErrCodeExchangeConnectFailed, common.ErrMsgExchangeConnectFailed, "Reconnect failed")
 				continue
 			}
 			o.resubscribe()
@@ -134,10 +127,7 @@ func (o *OKX) readLoop() {
 					continue
 				}
 				if event == "error" {
-					log.Error().
-						Interface("data", genericResp).
-						Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-						Msg("Received OKX error")
+					logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Received OKX error", "data", genericResp)
 					continue
 				}
 			}
@@ -171,13 +161,9 @@ func (o *OKX) readLoop() {
 				if ok {
 					select {
 					case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: qty, Pair: pair}:
-						log.Debug().Str("pair", pair).Msg("Sent OKX trade to channel")
+						logger.Debug("Sent OKX trade to channel", "pair", pair)
 					default:
-						log.Warn().
-							Str("error_code", common.ErrCodeChannelFull.String()).
-							Str("error_message", common.ErrMsgChannelFull.String()).
-							Str("pair", pair).
-							Msg("Dropped OKX trade due to full channel")
+						logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped OKX trade due to full channel", "pair", pair)
 					}
 				}
 			}
@@ -187,6 +173,7 @@ func (o *OKX) readLoop() {
 }
 
 func (o *OKX) pingLoop() {
+	logger := util.NewLogger()
 	ticker := time.NewTicker(o.pingInterval)
 	defer ticker.Stop()
 
@@ -197,17 +184,14 @@ func (o *OKX) pingLoop() {
 			err := o.conn.WriteMessage(websocket.TextMessage, []byte("ping"))
 			o.mu.Unlock()
 			if err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangePingFailed.String()).
-					Str("error_message", common.ErrMsgExchangePingFailed.String()).
-					Msg("OKX ping error")
+				logger.Error(err, common.ErrCodeExchangePingFailed, common.ErrMsgExchangePingFailed, "OKX ping error")
 			}
 		}
 	}
 }
 
 func (o *OKX) resubscribe() {
+	logger := util.NewLogger()
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -223,31 +207,23 @@ func (o *OKX) resubscribe() {
 		}
 		if o.conn != nil {
 			if err := o.conn.WriteJSON(sub); err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangeSubscribeFailed.String()).
-					Str("error_message", common.ErrMsgExchangeSubscribeFailed.String()).
-					Str("pair", pair).
-					Msg("OKX resubscribe failed")
+				logger.Error(err, common.ErrCodeExchangeSubscribeFailed, common.ErrMsgExchangeSubscribeFailed, "OKX resubscribe failed", "pair", pair)
 			} else {
-				log.Info().Str("pair", pair).Msg("Resubscribed to OKX trade feed")
+				logger.Info("Resubscribed to OKX trade feed", "pair", pair)
 			}
 		}
 	}
 }
 
 func (o *OKX) Close() {
+	logger := util.NewLogger()
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	o.reconnect = false
 	if o.conn != nil {
 		if err := o.conn.Close(); err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeOKXExchangeConnectionCloseFailed.String()).
-				Str("error_message", common.ErrMsgOKXExchangeConnectionCloseFailed.String()).
-				Msg("Failed to close Binance WebSocket connection during shutdown")
+			logger.Error(err, common.ErrCodeOKXExchangeConnectionCloseFailed, common.ErrMsgOKXExchangeConnectionCloseFailed, "Failed to close OKX WebSocket connection during shutdown")
 		}
 		o.conn = nil
 	}

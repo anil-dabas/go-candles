@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/rs/zerolog/log"
 	"go-candles/internal/common"
 	"go-candles/internal/util"
 	"go-candles/pkg/models"
@@ -54,6 +53,7 @@ func (c *Binance) Connect() error {
 }
 
 func (c *Binance) Subscribe(pair string, ch chan models.Trade) error {
+	logger := util.NewLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -76,27 +76,20 @@ func (c *Binance) Subscribe(pair string, ch chan models.Trade) error {
 		return fmt.Errorf("%s %s: %w", common.ErrMsgExchangeSubscribeFailed.String(), pair, err)
 	}
 
-	log.Info().Str("pair", pair).Msg("Subscribed to Binance trade feed")
+	logger.Info("Subscribed to Binance trade feed", "pair", pair)
 	return nil
 }
 
 func (c *Binance) readLoop() {
+	logger := util.NewLogger()
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error().
-				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
-				Interface("recover", r).
-				Msg("Recovered from panic in Binance read loop")
+			logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Recovered from panic in Binance read loop", "recover", r)
 
 			c.mu.Lock()
 			if c.conn != nil {
 				if err := c.conn.Close(); err != nil {
-					log.Error().
-						Err(err).
-						Str("error_code", common.ErrCodeBinanceExchangeConnectionCloseFailed.String()).
-						Str("error_message", common.ErrMsgBinanceExchangeConnectionCloseFailed.String()).
-						Msg("Failed to close Binance WebSocket connection")
+					logger.Error(err, common.ErrCodeBinanceExchangeConnectionCloseFailed, common.ErrMsgBinanceExchangeConnectionCloseFailed, "Failed to close Binance WebSocket connection")
 				}
 				c.conn = nil
 			}
@@ -105,7 +98,7 @@ func (c *Binance) readLoop() {
 			if c.reconnectAttempts < c.maxReconnectAttempts {
 				time.Sleep(c.reconnectInterval)
 				if err := c.Connect(); err != nil {
-					log.Error().Err(err).Msg("Reconnect failed after panic")
+					logger.Error(err, common.ErrCodeExchangeConnectFailed, common.ErrMsgExchangeConnectFailed, "Reconnect failed after panic")
 				}
 			}
 		}
@@ -119,11 +112,7 @@ func (c *Binance) readLoop() {
 
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
-				Msg("Binance read error, reconnecting")
+			logger.Error(err, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Binance read error, reconnecting")
 
 			c.mu.Lock()
 			if c.conn != nil {
@@ -133,7 +122,7 @@ func (c *Binance) readLoop() {
 			c.mu.Unlock()
 
 			if c.reconnectAttempts >= c.maxReconnectAttempts {
-				log.Error().Msg("Max reconnect attempts reached")
+				logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Max reconnect attempts reached")
 				c.reconnect = false
 				return
 			}
@@ -141,7 +130,7 @@ func (c *Binance) readLoop() {
 			c.reconnectAttempts++
 			time.Sleep(c.reconnectInterval)
 			if err := c.Connect(); err != nil {
-				log.Error().Err(err).Msg("Reconnect failed")
+				logger.Error(err, common.ErrCodeExchangeConnectFailed, common.ErrMsgExchangeConnectFailed, "Reconnect failed")
 				continue
 			}
 			c.resubscribe()
@@ -154,7 +143,7 @@ func (c *Binance) readLoop() {
 			Id     int64       `json:"id"`
 		}
 		if err := json.Unmarshal(data, &pingResp); err == nil && pingResp.Result == nil && pingResp.Id != 0 {
-			log.Debug().Int64("id", pingResp.Id).Msg("Received Binance ping response")
+			logger.Debug("Received Binance ping response", "id", pingResp.Id)
 			continue
 		}
 
@@ -164,7 +153,7 @@ func (c *Binance) readLoop() {
 			Id     int64    `json:"id"`
 		}
 		if err := json.Unmarshal(data, &subResp); err == nil && len(subResp.Result) == 0 && subResp.Id != 0 {
-			log.Debug().Int64("id", subResp.Id).Msg("Received Binance subscription response")
+			logger.Debug("Received Binance subscription response", "id", subResp.Id)
 			continue
 		}
 
@@ -181,10 +170,7 @@ func (c *Binance) readLoop() {
 			IsTradeValid bool   `json:"M"`
 		}
 		if err := json.Unmarshal(data, &tradeResp); err != nil {
-			log.Warn().
-				Err(err).
-				Str("data", string(data)).
-				Msg("Failed to unmarshal Binance message")
+			logger.Warn(common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Failed to unmarshal Binance message", "data", string(data))
 			continue
 		}
 		if tradeResp.EventType != "trade" {
@@ -202,19 +188,16 @@ func (c *Binance) readLoop() {
 		if ok {
 			select {
 			case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}:
-				log.Debug().Str("pair", pair).Msg("Sent Binance trade to channel")
+				logger.Debug("Sent Binance trade to channel", "pair", pair)
 			default:
-				log.Warn().
-					Str("error_code", common.ErrCodeChannelFull.String()).
-					Str("error_message", common.ErrMsgChannelFull.String()).
-					Str("pair", pair).
-					Msg("Dropped Binance trade due to full channel")
+				logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped Binance trade due to full channel", "pair", pair)
 			}
 		}
 	}
 }
 
 func (c *Binance) pingLoop() {
+	logger := util.NewLogger()
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 
@@ -228,17 +211,14 @@ func (c *Binance) pingLoop() {
 			})
 			c.mu.Unlock()
 			if err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangePingFailed.String()).
-					Str("error_message", common.ErrMsgExchangePingFailed.String()).
-					Msg("Binance ping error")
+				logger.Error(err, common.ErrCodeExchangePingFailed, common.ErrMsgExchangePingFailed, "Binance ping error")
 			}
 		}
 	}
 }
 
 func (c *Binance) resubscribe() {
+	logger := util.NewLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -251,31 +231,23 @@ func (c *Binance) resubscribe() {
 		}
 		if c.conn != nil {
 			if err := c.conn.WriteJSON(sub); err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangeSubscribeFailed.String()).
-					Str("error_message", common.ErrMsgExchangeSubscribeFailed.String()).
-					Str("pair", pair).
-					Msg("Binance resubscribe failed")
+				logger.Error(err, common.ErrCodeExchangeSubscribeFailed, common.ErrMsgExchangeSubscribeFailed, "Binance resubscribe failed", "pair", pair)
 			} else {
-				log.Info().Str("pair", pair).Msg("Resubscribed to Binance trade feed")
+				logger.Info("Resubscribed to Binance trade feed", "pair", pair)
 			}
 		}
 	}
 }
 
 func (c *Binance) Close() {
+	logger := util.NewLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.reconnect = false
 	if c.conn != nil {
 		if err := c.conn.Close(); err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeBinanceExchangeConnectionCloseFailed.String()).
-				Str("error_message", common.ErrMsgBinanceExchangeConnectionCloseFailed.String()).
-				Msg("Failed to close Binance WebSocket connection during shutdown")
+			logger.Error(err, common.ErrCodeBinanceExchangeConnectionCloseFailed, common.ErrMsgBinanceExchangeConnectionCloseFailed, "Failed to close Binance WebSocket connection during shutdown")
 		}
 		c.conn = nil
 	}

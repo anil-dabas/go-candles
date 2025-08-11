@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/rs/zerolog/log"
 	"go-candles/internal/common"
 	"go-candles/internal/util"
 	"go-candles/pkg/models"
@@ -54,6 +53,7 @@ func (c *Coinbase) Connect() error {
 }
 
 func (c *Coinbase) Subscribe(pair string, ch chan models.Trade) error {
+	logger := util.NewLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -73,27 +73,20 @@ func (c *Coinbase) Subscribe(pair string, ch chan models.Trade) error {
 		return fmt.Errorf("%s %s: %w", common.ErrMsgExchangeSubscribeFailed.String(), pair, err)
 	}
 
-	log.Info().Str("pair", pair).Msg("Subscribed to Coinbase trade feed")
+	logger.Info("Subscribed to Coinbase trade feed", "pair", pair)
 	return nil
 }
 
 func (c *Coinbase) readLoop() {
+	logger := util.NewLogger()
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error().
-				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
-				Interface("recover", r).
-				Msg("Recovered from panic in Coinbase read loop")
+			logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Recovered from panic in Coinbase read loop", "recover", r)
 
 			c.mu.Lock()
 			if c.conn != nil {
 				if err := c.conn.Close(); err != nil {
-					log.Error().
-						Err(err).
-						Str("error_code", common.ErrCodeCoinbaseExchangeConnectionCloseFailed.String()).
-						Str("error_message", common.ErrMsgCoinbaseExchangeConnectionCloseFailed.String()).
-						Msg("Failed to close Binance WebSocket connection")
+					logger.Error(err, common.ErrCodeCoinbaseExchangeConnectionCloseFailed, common.ErrMsgCoinbaseExchangeConnectionCloseFailed, "Failed to close Coinbase WebSocket connection")
 				}
 				c.conn = nil
 			}
@@ -102,7 +95,7 @@ func (c *Coinbase) readLoop() {
 			if c.reconnectAttempts < c.maxReconnectAttempts {
 				time.Sleep(c.reconnectInterval)
 				if err := c.Connect(); err != nil {
-					log.Error().Err(err).Msg("Reconnect failed after panic")
+					logger.Error(err, common.ErrCodeExchangeConnectFailed, common.ErrMsgExchangeConnectFailed, "Reconnect failed after panic")
 				}
 			}
 		}
@@ -116,11 +109,7 @@ func (c *Coinbase) readLoop() {
 
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-				Str("error_message", common.ErrMsgExchangeReadFailed.String()).
-				Msg("Coinbase read error, reconnecting")
+			logger.Error(err, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Coinbase read error, reconnecting")
 
 			c.mu.Lock()
 			if c.conn != nil {
@@ -130,7 +119,7 @@ func (c *Coinbase) readLoop() {
 			c.mu.Unlock()
 
 			if c.reconnectAttempts >= c.maxReconnectAttempts {
-				log.Error().Msg("Max reconnect attempts reached")
+				logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Max reconnect attempts reached")
 				c.reconnect = false
 				return
 			}
@@ -138,7 +127,7 @@ func (c *Coinbase) readLoop() {
 			c.reconnectAttempts++
 			time.Sleep(c.reconnectInterval)
 			if err := c.Connect(); err != nil {
-				log.Error().Err(err).Msg("Reconnect failed")
+				logger.Error(err, common.ErrCodeExchangeConnectFailed, common.ErrMsgExchangeConnectFailed, "Reconnect failed")
 				continue
 			}
 			c.resubscribe()
@@ -151,10 +140,7 @@ func (c *Coinbase) readLoop() {
 			Message string `json:"message"`
 		}
 		if err := json.Unmarshal(data, &errorResp); err == nil && errorResp.Type == "error" {
-			log.Error().
-				Str("error_code", common.ErrCodeExchangeReadFailed.String()).
-				Str("error_message", errorResp.Message).
-				Msg("Coinbase subscription error")
+			logger.Error(nil, common.ErrCodeExchangeReadFailed, common.ErrorMessage(errorResp.Message), "Coinbase subscription error")
 			continue
 		}
 
@@ -188,10 +174,7 @@ func (c *Coinbase) readLoop() {
 			quantity := util.ParseFloat(tradeResp.Size)
 			ts, err := time.Parse(time.RFC3339Nano, tradeResp.Time)
 			if err != nil {
-				log.Error().
-					Err(err).
-					Str("time", tradeResp.Time).
-					Msg("Failed to parse Coinbase trade time")
+				logger.Error(err, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Failed to parse Coinbase trade time", "time", tradeResp.Time)
 				continue
 			}
 			pair := util.PairFromCoinbase(tradeResp.ProductID)
@@ -202,13 +185,9 @@ func (c *Coinbase) readLoop() {
 			if ok {
 				select {
 				case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}:
-					log.Debug().Str("pair", pair).Msg("Sent Coinbase trade to channel")
+					logger.Debug("Sent Coinbase trade to channel", "pair", pair)
 				default:
-					log.Warn().
-						Str("error_code", common.ErrCodeChannelFull.String()).
-						Str("error_message", common.ErrMsgChannelFull.String()).
-						Str("pair", pair).
-						Msg("Dropped Coinbase trade due to full channel")
+					logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped Coinbase trade due to full channel", "pair", pair)
 				}
 			}
 			continue
@@ -235,10 +214,7 @@ func (c *Coinbase) readLoop() {
 						quantity := util.ParseFloat(trade.Size)
 						ts, err := time.Parse(time.RFC3339Nano, trade.Time)
 						if err != nil {
-							log.Error().
-								Err(err).
-								Str("time", trade.Time).
-								Msg("Failed to parse Coinbase snapshot trade time")
+							logger.Error(err, common.ErrCodeExchangeReadFailed, common.ErrMsgExchangeReadFailed, "Failed to parse Coinbase snapshot trade time", "time", trade.Time)
 							continue
 						}
 						pair := util.PairFromCoinbase(trade.ProductID)
@@ -249,13 +225,9 @@ func (c *Coinbase) readLoop() {
 						if ok {
 							select {
 							case ch <- models.Trade{Timestamp: ts, Price: price, Quantity: quantity, Pair: pair}:
-								log.Debug().Str("pair", pair).Msg("Sent Coinbase snapshot trade to channel")
+								logger.Debug("Sent Coinbase snapshot trade to channel", "pair", pair)
 							default:
-								log.Warn().
-									Str("error_code", common.ErrCodeChannelFull.String()).
-									Str("error_message", common.ErrMsgChannelFull.String()).
-									Str("pair", pair).
-									Msg("Dropped Coinbase snapshot trade due to full channel")
+								logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped Coinbase snapshot trade due to full channel", "pair", pair)
 							}
 						}
 					}
@@ -267,6 +239,7 @@ func (c *Coinbase) readLoop() {
 }
 
 func (c *Coinbase) pingLoop() {
+	logger := util.NewLogger()
 	ticker := time.NewTicker(c.pingInterval)
 	defer ticker.Stop()
 
@@ -280,17 +253,14 @@ func (c *Coinbase) pingLoop() {
 			})
 			c.mu.Unlock()
 			if err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangePingFailed.String()).
-					Str("error_message", common.ErrMsgExchangePingFailed.String()).
-					Msg("Coinbase ping error")
+				logger.Error(err, common.ErrCodeExchangePingFailed, common.ErrMsgExchangePingFailed, "Coinbase ping error")
 			}
 		}
 	}
 }
 
 func (c *Coinbase) resubscribe() {
+	logger := util.NewLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -302,31 +272,23 @@ func (c *Coinbase) resubscribe() {
 		}
 		if c.conn != nil {
 			if err := c.conn.WriteJSON(msg); err != nil {
-				log.Error().
-					Err(err).
-					Str("error_code", common.ErrCodeExchangeSubscribeFailed.String()).
-					Str("error_message", common.ErrMsgExchangeSubscribeFailed.String()).
-					Str("pair", pair).
-					Msg("Coinbase resubscribe failed")
+				logger.Error(err, common.ErrCodeExchangeSubscribeFailed, common.ErrMsgExchangeSubscribeFailed, "Coinbase resubscribe failed", "pair", pair)
 			} else {
-				log.Info().Str("pair", pair).Msg("Resubscribed to Coinbase trade feed")
+				logger.Info("Resubscribed to Coinbase trade feed", "pair", pair)
 			}
 		}
 	}
 }
 
 func (c *Coinbase) Close() {
+	logger := util.NewLogger()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.reconnect = false
 	if c.conn != nil {
 		if err := c.conn.Close(); err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeCoinbaseExchangeConnectionCloseFailed.String()).
-				Str("error_message", common.ErrMsgCoinbaseExchangeConnectionCloseFailed.String()).
-				Msg("Failed to close Binance WebSocket connection during shutdown")
+			logger.Error(err, common.ErrCodeCoinbaseExchangeConnectionCloseFailed, common.ErrMsgCoinbaseExchangeConnectionCloseFailed, "Failed to close Coinbase WebSocket connection during shutdown")
 		}
 		c.conn = nil
 	}

@@ -3,8 +3,8 @@ package aggregator
 import (
 	"time"
 
-	"github.com/rs/zerolog/log"
 	"go-candles/internal/common"
+	"go-candles/internal/util"
 	"go-candles/pkg/models"
 )
 
@@ -27,6 +27,7 @@ func NewBuilder(pair string, interval time.Duration, trades chan models.Trade, o
 }
 
 func (b *Builder) buildLoop() {
+	logger := util.NewLogger()
 	var candle *models.Candle
 	start := time.Now().UTC().Truncate(b.interval)
 	ticker := time.NewTicker(b.interval)
@@ -40,11 +41,7 @@ func (b *Builder) buildLoop() {
 					select {
 					case b.out <- *candle:
 					default:
-						log.Warn().
-							Str("error_code", common.ErrCodeChannelFull.String()).
-							Str("error_message", common.ErrMsgChannelFull.String()).
-							Str("pair", candle.Pair).
-							Msg("Dropped final candle due to full output channel")
+						logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped final candle due to full output channel", "pair", candle.Pair)
 					}
 				}
 				return
@@ -56,11 +53,7 @@ func (b *Builder) buildLoop() {
 					select {
 					case b.out <- *candle:
 					default:
-						log.Warn().
-							Str("error_code", common.ErrCodeChannelFull.String()).
-							Str("error_message", common.ErrMsgChannelFull.String()).
-							Str("pair", candle.Pair).
-							Msg("Dropped candle due to full output channel")
+						logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped candle due to full output channel", "pair", candle.Pair)
 					}
 				}
 				start = tradeTs.Truncate(b.interval)
@@ -89,11 +82,7 @@ func (b *Builder) buildLoop() {
 				select {
 				case b.out <- *candle:
 				default:
-					log.Warn().
-						Str("error_code", common.ErrCodeChannelFull.String()).
-						Str("error_message", common.ErrMsgChannelFull.String()).
-						Str("pair", candle.Pair).
-						Msg("Dropped candle due to full output channel")
+					logger.Warn(common.ErrCodeChannelFull, common.ErrMsgChannelFull, "Dropped candle due to full output channel", "pair", candle.Pair)
 				}
 				start = time.Now().UTC().Truncate(b.interval)
 				candle = nil

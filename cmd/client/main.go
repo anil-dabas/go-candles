@@ -15,6 +15,7 @@ import (
 	"go-candles/internal/common"
 	"go-candles/internal/config"
 	"go-candles/internal/proto"
+	"go-candles/internal/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -30,6 +31,7 @@ func main() {
 	// Configure logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	logger := util.NewLogger()
 
 	configPath := flag.String("config", common.DefaultConfigPath, "Path to config file")
 	pairsStr := flag.String("pairs", "", "Comma-separated pairs to subscribe (overrides config)")
@@ -39,11 +41,8 @@ func main() {
 
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatal().
-			Err(err).
-			Str("error_code", common.ErrCodeConfigLoadFailed.String()).
-			Str("error_message", common.ErrMsgConfigLoadFailed.String()).
-			Msg("Failed to load config")
+		logger.Error(err, common.ErrCodeConfigLoadFailed, common.ErrMsgConfigLoadFailed, "Failed to load config")
+		os.Exit(1)
 	}
 
 	var pairs []string
@@ -58,16 +57,12 @@ func main() {
 
 	for {
 		if *maxRetries > 0 && retryCount >= *maxRetries {
-			log.Error().Msg("Maximum retry attempts reached. Exiting...")
+			logger.Error(nil, common.ErrCodeStreamClosed, common.ErrMsgStreamClosed, "Maximum retry attempts reached. Exiting...")
 			break
 		}
 
 		if retryCount > 0 {
-			log.Info().
-				Int("retry_count", retryCount).
-				Int("max_retries", *maxRetries).
-				Int("retry_interval_sec", *retryInterval).
-				Msg("Attempting to reconnect...")
+			logger.Info("Attempting to reconnect...", "retry_count", retryCount, "max_retries", *maxRetries, "retry_interval_sec", *retryInterval)
 			time.Sleep(time.Duration(*retryInterval) * time.Second)
 		}
 
@@ -84,39 +79,28 @@ func main() {
 			),
 		)
 		if err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeGRPCConnectionFailed.String()).
-				Str("error_message", common.ErrMsgGRPCConnectionFailed.String()).
-				Str("address", serverAddr).
-				Msg("gRPC connect failed")
+			logger.Error(err, common.ErrCodeGRPCConnectionFailed, common.ErrMsgGRPCConnectionFailed, "gRPC connect failed", "address", serverAddr)
 			retryCount++
 			continue
 		}
 
-		log.Info().Str("address", serverAddr).Msg("Successfully connected to gRPC server")
+		logger.Info("Successfully connected to gRPC server", "address", serverAddr)
 
 		client := proto.NewCandleServiceClient(conn)
 		if err := streamCandles(ctx, client, pairs); err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeStreamClosed.String()).
-				Str("error_message", common.ErrMsgStreamClosed.String()).
-				Msg("Streaming error occurred")
+			logger.Error(err, common.ErrCodeStreamClosed, common.ErrMsgStreamClosed, "Streaming error occurred")
 		}
 
 		if err := conn.Close(); err != nil {
-			log.Error().
-				Err(err).
-				Str("error_code", common.ErrCodeGRPCConnectionCloseFailed.String()).
-				Str("error_message", common.ErrMsgGRPCConnectionCloseFailed.String()).
-				Msg("Failed to close gRPC connection")
+			logger.Error(err, common.ErrCodeGRPCConnectionCloseFailed, common.ErrMsgGRPCConnectionCloseFailed, "Failed to close gRPC connection")
 		}
 		retryCount++
 	}
 }
 
 func streamCandles(ctx context.Context, client proto.CandleServiceClient, pairs []string) error {
+	logger := util.NewLogger()
+
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -125,17 +109,17 @@ func streamCandles(ctx context.Context, client proto.CandleServiceClient, pairs 
 		return fmt.Errorf("subscribe failed: %w", err)
 	}
 
-	log.Info().Strs("pairs", pairs).Msg("Subscribed to candle stream")
+	logger.Info("Subscribed to candle stream", "pairs", pairs)
 
 	for {
 		resp, err := stream.Recv()
 		if err == io.EOF {
-			log.Info().Msg("Stream closed by server (EOF)")
+			logger.Info("Stream closed by server (EOF)")
 			return nil
 		}
 		if err != nil {
 			if isContextError(err) {
-				log.Debug().Err(err).Msg("Context canceled, stopping stream")
+				logger.Debug("Context canceled, stopping stream", "error", err)
 				return nil
 			}
 			return fmt.Errorf("receive error: %w", err)
